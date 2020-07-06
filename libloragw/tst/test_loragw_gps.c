@@ -50,6 +50,7 @@ struct tref ppm_ref;
 static void sig_handler(int sigio);
 static void gps_process_sync(void);
 static void gps_process_coords(void);
+static void usage(void);
 
 /* -------------------------------------------------------------------------- */
 /* --- PRIVATE FUNCTIONS DEFINITION ----------------------------------------- */
@@ -128,12 +129,24 @@ static void gps_process_coords(void) {
     }
 }
 
+/* describe command line options */
+void usage(void) {
+    printf("Library version information: %s\n", lgw_version_info());
+    printf( "Available options:\n");
+    printf( " -h print this help\n");
+    printf( " -d <string> TTY device\n");
+    printf( " -v increase verbosity level\n");
+}
+
 /* -------------------------------------------------------------------------- */
 /* --- MAIN FUNCTION -------------------------------------------------------- */
 
-int main()
+int main(int argc, char *argv[])
 {
     struct sigaction sigact; /* SIGQUIT&SIGINT&SIGTERM signal handling */
+
+    char *gps_tty_dev_path = "/dev/ttyAMA0";
+    int verbosity = 0;
 
     int i;
 
@@ -157,16 +170,42 @@ int main()
     sigaction(SIGINT, &sigact, NULL);
     sigaction(SIGTERM, &sigact, NULL);
 
+    /* parse command line options */
+    while ((i = getopt (argc, argv, "hd:v")) != -1) {
+        switch (i) {
+            case 'h':
+                usage();
+                return -1;
+                break;
+            case 'd': /* <string> TTY device */
+                gps_tty_dev_path = optarg;
+                break;
+            case 'v': /* increase verbosity level */
+                verbosity++;
+                break;
+            default:
+                printf("ERROR: argument parsing\n");
+                usage();
+                return -1;
+        }
+    }
+
     /* Intro message and library information */
     printf("Beginning of test for loragw_gps.c\n");
     printf("*** Library version information ***\n%s\n***\n", lgw_version_info());
 
+    if (verbosity > 0)
+        printf("Using TTY device %s\n", gps_tty_dev_path);
+
     /* Open and configure GPS */
-    i = lgw_gps_enable("/dev/ttyAMA0", "ubx7", 0, &gps_tty_dev);
+    i = lgw_gps_enable(gps_tty_dev_path, "ubx7", 0, &gps_tty_dev);
     if (i != LGW_GPS_SUCCESS) {
         printf("ERROR: IMPOSSIBLE TO ENABLE GPS\n");
         exit(EXIT_FAILURE);
     }
+
+    if (verbosity > 0)
+        printf("GPS configured and enabled\n");
 
     /* start concentrator (default conf for IoT SK) */
     /* board config */
@@ -186,6 +225,9 @@ int main()
 
     lgw_start();
 
+    if (verbosity > 0)
+        printf("LGW started\n");
+
     /* initialize some variables before loop */
     memset(serial_buff, 0, sizeof serial_buff);
     memset(&ppm_ref, 0, sizeof ppm_ref);
@@ -201,6 +243,10 @@ int main()
             printf("WARNING: [gps] read() returned value %d\n", nb_char);
             continue;
         }
+
+        if (verbosity > 1)
+            printf("Readed %d bytes from %s device\n", nb_char, gps_tty_dev_path);
+
         wr_idx += (size_t)nb_char;
 
         /*******************************************
@@ -216,12 +262,20 @@ int main()
                 /***********************
                  * Found UBX sync char *
                  ***********************/
+                if (verbosity > 1)
+                    printf("Founded UBX sync char (rd_idx = %d, wr_idx = %d)\n", rd_idx, wr_idx);
+
                 latest_msg = lgw_parse_ubx(&serial_buff[rd_idx], (wr_idx - rd_idx), &frame_size);
+
+                if (verbosity > 1)
+                    printf("Parsed UBX message %d\n", latest_msg);
 
                 if (frame_size > 0) {
                     if (latest_msg == INCOMPLETE) {
                         /* UBX header found but frame appears to be missing bytes */
                         frame_size = 0;
+                        if (verbosity > 1)
+                            printf("UBX header found but frame appears to be missing bytes\n");
                     } else if (latest_msg == INVALID) {
                         /* message header received but message appears to be corrupted */
                         printf("WARNING: [gps] could not get a valid message from GPS (no time)\n");
@@ -235,17 +289,28 @@ int main()
                 /************************
                  * Found NMEA sync char *
                  ************************/
+                if (verbosity > 1)
+                    printf("Founded NMEA sync char (rd_idx = %d, wr_idx = %d)\n", rd_idx, wr_idx);
+
                 /* scan for NMEA end marker (LF = 0x0a) */
                 char* nmea_end_ptr = memchr(&serial_buff[rd_idx],(int)0x0a, (wr_idx - rd_idx));
 
                 if (nmea_end_ptr) {
+                    if (verbosity > 1)
+                        printf("Founded NMEA end marker\n");
+
                     /* found end marker */
                     frame_size = nmea_end_ptr - &serial_buff[rd_idx] + 1;
                     latest_msg = lgw_parse_nmea(&serial_buff[rd_idx], frame_size);
 
+                    if (verbosity > 1)
+                        printf("Parsed NMEA message %d\n", latest_msg);
+
                     if(latest_msg == INVALID || latest_msg == UNKNOWN) {
                         /* checksum failed */
                         frame_size = 0;
+                        if (verbosity > 1)
+                            printf("NMEA checksum failed\n");
                     } else if (latest_msg == NMEA_RMC) { /* Get location from RMC frames */
                         gps_process_coords();
                     }
