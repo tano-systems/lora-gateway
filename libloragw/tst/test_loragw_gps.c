@@ -134,7 +134,7 @@ void usage(void) {
     printf("Library version information: %s\n", lgw_version_info());
     printf( "Available options:\n");
     printf( " -h print this help\n");
-    printf( " -d <string> TTY device\n");
+    printf( " -d <string> TTY device or I2C bus\n");
     printf( " -v increase verbosity level\n");
 }
 
@@ -195,7 +195,7 @@ int main(int argc, char *argv[])
     printf("*** Library version information ***\n%s\n***\n", lgw_version_info());
 
     if (verbosity > 0)
-        printf("Using TTY device %s\n", gps_tty_dev_path);
+        printf("Using device %s\n", gps_tty_dev_path);
 
     /* Open and configure GPS */
     i = lgw_gps_enable(gps_tty_dev_path, "ubx7", 0, &gps_tty_dev);

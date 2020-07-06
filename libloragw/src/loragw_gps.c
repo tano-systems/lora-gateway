@@ -29,6 +29,8 @@ Maintainer: Michael Coracin
 #include <fcntl.h>      /* open */
 #include <termios.h>    /* tcflush */
 #include <math.h>       /* modf */
+#include <linux/i2c-dev.h>
+#include <sys/ioctl.h>
 
 #include <stdlib.h>
 
@@ -253,19 +255,29 @@ int str_chop(char *s, int buff_size, char separator, int *idx_ary, int max_idx) 
 
 int lgw_gps_enable(char *tty_path, char *gps_family, speed_t target_brate, int *fd_ptr) {
     int i;
+    int is_serial = 1;
     struct termios ttyopt; /* serial port options */
     int gps_tty_dev; /* file descriptor to the serial port of the GNSS module */
-    uint8_t ubx_cmd_timegps[UBX_MSG_NAVTIMEGPS_LEN] = {
+    uint8_t ubx_cmd_timegps_serial[UBX_MSG_NAVTIMEGPS_LEN] = {
                     0xB5, 0x62, /* UBX Sync Chars */
                     0x06, 0x01, /* CFG-MSG Class/ID */
                     0x08, 0x00, /* Payload length */
                     0x01, 0x20, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, /* Enable NAV-TIMEGPS output on serial */
                     0x32, 0x94 }; /* Checksum */
+    uint8_t ubx_cmd_timegps_i2c[UBX_MSG_NAVTIMEGPS_LEN] = {
+                    0xB5, 0x62, /* UBX Sync Chars */
+                    0x06, 0x01, /* CFG-MSG Class/ID */
+                    0x08, 0x00, /* Payload length */
+                    0x01, 0x20, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, /* Enable NAV-TIMEGPS output on I2C */
+                    0x31, 0x91 }; /* Checksum */
     ssize_t num_written;
 
     /* check input parameters */
     CHECK_NULL(tty_path);
     CHECK_NULL(fd_ptr);
+
+    if (strstr(tty_path, "i2c"))
+        is_serial = 0;
 
     /* open TTY device */
     gps_tty_dev = open(tty_path, O_RDWR | O_NOCTTY);
@@ -275,84 +287,100 @@ int lgw_gps_enable(char *tty_path, char *gps_family, speed_t target_brate, int *
     }
     *fd_ptr = gps_tty_dev;
 
+    if (!is_serial) {
+        if (ioctl(gps_tty_dev, I2C_SLAVE, 0x42) < 0) {
+            DEBUG_MSG("ERROR: I2C FAIL TO SET ADDR\n");
+            return LGW_GPS_ERROR;
+        }
+    }
+
     /* manage the different GPS modules families */
-    if (gps_family == NULL) {
-        DEBUG_MSG("WARNING: this version of GPS module may not be supported\n");
-    } else if (strncmp(gps_family, "ubx7", 4) != 0) {
-        /* The current implementation relies on proprietary messages from U-Blox */
-        /* GPS modules (UBX, NAV-TIMEGPS...) and has only be tested with a u-blox 7. */
-        /* Those messages allow to get NATIVE GPS time (no leap seconds) required */
-        /* for class-B handling and GPS synchronization */
-        /* see lgw_parse_ubx() function for details */
-        DEBUG_MSG("WARNING: this version of GPS module may not be supported\n");
+    if (is_serial) {
+        if (gps_family == NULL) {
+            DEBUG_MSG("WARNING: this version of GPS module may not be supported\n");
+        } else if (strncmp(gps_family, "ubx7", 4) != 0) {
+            /* The current implementation relies on proprietary messages from U-Blox */
+            /* GPS modules (UBX, NAV-TIMEGPS...) and has only be tested with a u-blox 7. */
+            /* Those messages allow to get NATIVE GPS time (no leap seconds) required */
+            /* for class-B handling and GPS synchronization */
+            /* see lgw_parse_ubx() function for details */
+            DEBUG_MSG("WARNING: this version of GPS module may not be supported\n");
+        }
+
+        /* manage the target bitrate */
+        if (target_brate != 0) {
+            DEBUG_MSG("WARNING: target_brate parameter ignored for now\n"); // TODO
+        }
+
+        /* get actual serial port configuration */
+        i = tcgetattr(gps_tty_dev, &ttyopt);
+        if (i != 0) {
+            DEBUG_MSG("ERROR: IMPOSSIBLE TO GET TTY PORT CONFIGURATION\n");
+            return LGW_GPS_ERROR;
+        }
+
+        /* Save current serial port configuration for restoring later */
+        memcpy(&ttyopt_restore, &ttyopt, sizeof ttyopt);
+
+        /* update baudrates */
+        cfsetispeed(&ttyopt, DEFAULT_BAUDRATE);
+        cfsetospeed(&ttyopt, DEFAULT_BAUDRATE);
+
+        /* update terminal parameters */
+        /* The following configuration should allow to:
+                - Get ASCII NMEA messages
+                - Get UBX binary messages
+                - Send UBX binary commands
+            Note: as binary data have to be read/written, we need to disable
+                  various character processing to avoid loosing data */
+        /* Control Modes */
+        ttyopt.c_cflag |= CLOCAL;  /* local connection, no modem control */
+        ttyopt.c_cflag |= CREAD;   /* enable receiving characters */
+        ttyopt.c_cflag |= CS8;     /* 8 bit frames */
+        ttyopt.c_cflag &= ~PARENB; /* no parity */
+        ttyopt.c_cflag &= ~CSTOPB; /* one stop bit */
+        /* Input Modes */
+        ttyopt.c_iflag |= IGNPAR;  /* ignore bytes with parity errors */
+        ttyopt.c_iflag &= ~ICRNL;  /* do not map CR to NL on input*/
+        ttyopt.c_iflag &= ~IGNCR;  /* do not ignore carriage return on input */
+        ttyopt.c_iflag &= ~IXON;   /* disable Start/Stop output control */
+        ttyopt.c_iflag &= ~IXOFF;  /* do not send Start/Stop characters */
+        /* Output Modes */
+        ttyopt.c_oflag = 0;        /* disable everything on output as we only write binary */
+        /* Local Modes */
+        ttyopt.c_lflag &= ~ICANON; /* disable canonical input - cannot use with binary input */
+        ttyopt.c_lflag &= ~ISIG;   /* disable check for INTR, QUIT, SUSP special characters */
+        ttyopt.c_lflag &= ~IEXTEN; /* disable any special control character */
+        ttyopt.c_lflag &= ~ECHO;   /* do not echo back every character typed */
+        ttyopt.c_lflag &= ~ECHOE;  /* does not erase the last character in current line */
+        ttyopt.c_lflag &= ~ECHOK;  /* do not echo NL after KILL character */
+
+        /* settings for non-canonical mode
+           read will block for until the lesser of VMIN or requested chars have been received */
+        ttyopt.c_cc[VMIN]  = LGW_GPS_MIN_MSG_SIZE;
+        ttyopt.c_cc[VTIME] = 0;
+
+        /* set new serial ports parameters */
+        i = tcsetattr(gps_tty_dev, TCSANOW, &ttyopt);
+        if (i != 0){
+            DEBUG_MSG("ERROR: IMPOSSIBLE TO UPDATE TTY PORT CONFIGURATION\n");
+            return LGW_GPS_ERROR;
+        }
+        tcflush(gps_tty_dev, TCIOFLUSH);
+
+        /* Send UBX CFG NAV-TIMEGPS message to tell GPS module to output native GPS time */
+        /* This is a binary message, serial port has to be properly configured to handle this */
+
+        num_written = write (gps_tty_dev, ubx_cmd_timegps_serial, UBX_MSG_NAVTIMEGPS_LEN);
+        if (num_written != UBX_MSG_NAVTIMEGPS_LEN) {
+            DEBUG_MSG("ERROR: Failed to write on serial port (written=%d)\n", (int) num_written);
+        }
     }
-
-    /* manage the target bitrate */
-    if (target_brate != 0) {
-        DEBUG_MSG("WARNING: target_brate parameter ignored for now\n"); // TODO
-    }
-
-    /* get actual serial port configuration */
-    i = tcgetattr(gps_tty_dev, &ttyopt);
-    if (i != 0) {
-        DEBUG_MSG("ERROR: IMPOSSIBLE TO GET TTY PORT CONFIGURATION\n");
-        return LGW_GPS_ERROR;
-    }
-
-    /* Save current serial port configuration for restoring later */
-    memcpy(&ttyopt_restore, &ttyopt, sizeof ttyopt);
-
-    /* update baudrates */
-    cfsetispeed(&ttyopt, DEFAULT_BAUDRATE);
-    cfsetospeed(&ttyopt, DEFAULT_BAUDRATE);
-
-    /* update terminal parameters */
-    /* The following configuration should allow to:
-            - Get ASCII NMEA messages
-            - Get UBX binary messages
-            - Send UBX binary commands
-        Note: as binary data have to be read/written, we need to disable
-              various character processing to avoid loosing data */
-    /* Control Modes */
-    ttyopt.c_cflag |= CLOCAL;  /* local connection, no modem control */
-    ttyopt.c_cflag |= CREAD;   /* enable receiving characters */
-    ttyopt.c_cflag |= CS8;     /* 8 bit frames */
-    ttyopt.c_cflag &= ~PARENB; /* no parity */
-    ttyopt.c_cflag &= ~CSTOPB; /* one stop bit */
-    /* Input Modes */
-    ttyopt.c_iflag |= IGNPAR;  /* ignore bytes with parity errors */
-    ttyopt.c_iflag &= ~ICRNL;  /* do not map CR to NL on input*/
-    ttyopt.c_iflag &= ~IGNCR;  /* do not ignore carriage return on input */
-    ttyopt.c_iflag &= ~IXON;   /* disable Start/Stop output control */
-    ttyopt.c_iflag &= ~IXOFF;  /* do not send Start/Stop characters */
-    /* Output Modes */
-    ttyopt.c_oflag = 0;        /* disable everything on output as we only write binary */
-    /* Local Modes */
-    ttyopt.c_lflag &= ~ICANON; /* disable canonical input - cannot use with binary input */
-    ttyopt.c_lflag &= ~ISIG;   /* disable check for INTR, QUIT, SUSP special characters */
-    ttyopt.c_lflag &= ~IEXTEN; /* disable any special control character */
-    ttyopt.c_lflag &= ~ECHO;   /* do not echo back every character typed */
-    ttyopt.c_lflag &= ~ECHOE;  /* does not erase the last character in current line */
-    ttyopt.c_lflag &= ~ECHOK;  /* do not echo NL after KILL character */
-
-    /* settings for non-canonical mode
-       read will block for until the lesser of VMIN or requested chars have been received */
-    ttyopt.c_cc[VMIN]  = LGW_GPS_MIN_MSG_SIZE;
-    ttyopt.c_cc[VTIME] = 0;
-
-    /* set new serial ports parameters */
-    i = tcsetattr(gps_tty_dev, TCSANOW, &ttyopt);
-    if (i != 0){
-        DEBUG_MSG("ERROR: IMPOSSIBLE TO UPDATE TTY PORT CONFIGURATION\n");
-        return LGW_GPS_ERROR;
-    }
-    tcflush(gps_tty_dev, TCIOFLUSH);
-
-    /* Send UBX CFG NAV-TIMEGPS message to tell GPS module to output native GPS time */
-    /* This is a binary message, serial port has to be properly configured to handle this */
-    num_written = write (gps_tty_dev, ubx_cmd_timegps, UBX_MSG_NAVTIMEGPS_LEN);
-    if (num_written != UBX_MSG_NAVTIMEGPS_LEN) {
-        DEBUG_MSG("ERROR: Failed to write on serial port (written=%d)\n", (int) num_written);
+    else {
+        num_written = write (gps_tty_dev, ubx_cmd_timegps_i2c, UBX_MSG_NAVTIMEGPS_LEN);
+        if (num_written != UBX_MSG_NAVTIMEGPS_LEN) {
+            DEBUG_MSG("ERROR: Failed to write to I2C device (written=%d)\n", (int) num_written);
+        }
     }
 
     /* get timezone info */
