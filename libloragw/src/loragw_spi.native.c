@@ -57,7 +57,11 @@ Maintainer: Sylvain Miermont
 #define SPI_DEV_PATH    "/dev/spidev0.0"
 //#define SPI_DEV_PATH    "/dev/spidev32766.0"
 
+#define SPI_SPEED_MIN   100000   // (100 kHz)
+#define SPI_SPEED_MAX   80000000 // (80 MHz)
+
 static char *spi_dev_path = SPI_DEV_PATH;
+static int spi_speed = SPI_SPEED;
 
 /* -------------------------------------------------------------------------- */
 /* --- PUBLIC FUNCTIONS DEFINITION ------------------------------------------ */
@@ -66,6 +70,17 @@ static char *spi_dev_path = SPI_DEV_PATH;
 int lgw_spi_set_path(const char *path) {
     if (path) {
         spi_dev_path = (char *)path;
+        return LGW_SPI_SUCCESS;
+    }
+    else {
+        return LGW_SPI_ERROR;
+    }
+}
+
+/* set SPI speed */
+int lgw_spi_set_speed(const int speed) {
+    if ((speed >= SPI_SPEED_MIN) && (speed <= SPI_SPEED_MAX)) {
+        spi_speed = speed;
         return LGW_SPI_SUCCESS;
     }
     else {
@@ -109,7 +124,7 @@ int lgw_spi_open(void **spi_target_ptr) {
     }
 
     /* setting SPI max clk (in Hz) */
-    i = SPI_SPEED;
+    i = spi_speed;
     a = ioctl(dev, SPI_IOC_WR_MAX_SPEED_HZ, &i);
     b = ioctl(dev, SPI_IOC_RD_MAX_SPEED_HZ, &i);
     if ((a < 0) || (b < 0)) {

@@ -54,6 +54,14 @@ Maintainer: Sylvain Miermont
 */
 int lgw_spi_set_path(const char *path);
 
+/* set SPI speed  */
+/**
+@brief LoRa concentrator SPI speed configuration for spidev
+@param speed Speed in Hz
+@return LGW_SPI_SUCCESS if speed is valid, LGW_SPI_ERROR if not
+*/
+int lgw_spi_set_speed(const int speed);
+
 /**
 @brief LoRa concentrator SPI setup (configure I/O and peripherals)
 @param spi_target_ptr pointer on a generic pointer to SPI target (implementation dependant)
