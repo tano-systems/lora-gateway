@@ -46,6 +46,14 @@ Maintainer: Sylvain Miermont
 /* -------------------------------------------------------------------------- */
 /* --- PUBLIC FUNCTIONS PROTOTYPES ------------------------------------------ */
 
+/* set SPI device */
+/**
+@brief LoRa concentrator SPI path configuration for spidev
+@param path pointer to spidev device
+@return LGW_SPI_SUCCESS if path is valid, LGW_SPI_ERROR if not
+*/
+int lgw_spi_set_path(const char *path);
+
 /**
 @brief LoRa concentrator SPI setup (configure I/O and peripherals)
 @param spi_target_ptr pointer on a generic pointer to SPI target (implementation dependant)
